@@ -11,12 +11,12 @@ from glob import glob
 
 def parse_args_paired_training(input_args=None):
     """
-    Parses command-line arguments used for configuring an paired session (pix2pix-Turbo).
+    Parses command-line arguments used for configuring a paired session (pix2pix-Turbo).
     This function sets up an argument parser to handle various training options.
 
     Returns:
     argparse.Namespace: The parsed command-line arguments.
-   """
+    """
     parser = argparse.ArgumentParser()
     # args for the loss function
     parser.add_argument("--gan_disc_type", default="vagan_clip")
@@ -43,7 +43,7 @@ def parse_args_paired_training(input_args=None):
     parser.add_argument("--pretrained_model_name_or_path")
     parser.add_argument("--revision", type=str, default=None,)
     parser.add_argument("--variant", type=str, default=None,)
-    parser.add_argument("--tokenizer_name", type=str, default=None)
+    parser.add_argument("--tokenizer_name", type=str, default=None)  # #### 수정됨: img2img에서는 사용하지 않음
     parser.add_argument("--lora_rank_unet", default=8, type=int)
     parser.add_argument("--lora_rank_vae", default=4, type=int)
 
@@ -65,6 +65,9 @@ def parse_args_paired_training(input_args=None):
             ' "constant", "constant_with_warmup"]'
         ),
     )
+    
+    parser.add_argument("--resume_checkpoint", type=str, default=None, help="이어 학습을 위해 불러올 체크포인트 파일 경로 (없으면 새로 학습 시작)")
+
     parser.add_argument("--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler.")
     parser.add_argument("--lr_num_cycles", type=int, default=1,
         help="Number of hard resets of the lr in cosine_with_restarts scheduler.",
@@ -108,7 +111,7 @@ def parse_args_unpaired_training():
 
     Returns:
     argparse.Namespace: The parsed command-line arguments.
-   """
+    """
 
     parser = argparse.ArgumentParser(description="Simple example of a ControlNet training script.")
 
@@ -218,7 +221,7 @@ def build_transform(image_prep):
 class PairedDataset(torch.utils.data.Dataset):
     def __init__(self, dataset_folder, split, image_prep, tokenizer):
         """
-        Itialize the paired dataset object for loading and transforming paired data samples
+        Initialize the paired dataset object for loading and transforming paired data samples
         from specified dataset folders.
 
         This constructor sets up the paths to input and output folders based on the specified 'split',
@@ -231,7 +234,7 @@ class PairedDataset(torch.utils.data.Dataset):
         - split (str): The dataset split to use ('train' or 'test'), used to select the appropriate
                        sub-folders and caption files within the dataset folder.
         - image_prep (str): The image preprocessing transformation to apply to each image.
-        - tokenizer: The tokenizer used for tokenizing the captions (or prompts).
+        - tokenizer: The tokenizer used for tokenizing the captions (or prompts).  #### 수정됨: img2img에서는 사용하지 않으므로 무시.
         """
         super().__init__()
         if split == "train":
@@ -246,7 +249,7 @@ class PairedDataset(torch.utils.data.Dataset):
             self.captions = json.load(f)
         self.img_names = list(self.captions.keys())
         self.T = build_transform(image_prep)
-        self.tokenizer = tokenizer
+        self.tokenizer = tokenizer  # #### 수정됨: tokenizer는 더 이상 사용되지 않음
 
     def __len__(self):
         """
@@ -258,11 +261,10 @@ class PairedDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         """
         Retrieves a dataset item given its index. Each item consists of an input image, 
-        its corresponding output image, the captions associated with the input image, 
-        and the tokenized form of this caption.
-
-        This method performs the necessary preprocessing on both the input and output images, 
-        including scaling and normalization, as well as tokenizing the caption using a provided tokenizer.
+        its corresponding output image.
+        
+        Since img2img training does not use textual prompts, the caption and tokenized form
+        are omitted.
 
         Parameters:
         - idx (int): The index of the item to retrieve.
@@ -270,59 +272,42 @@ class PairedDataset(torch.utils.data.Dataset):
         Returns:
         dict: A dictionary containing the following key-value pairs:
             - "output_pixel_values": a tensor of the preprocessed output image with pixel values 
-            scaled to [-1, 1].
+              scaled to [-1, 1].
             - "conditioning_pixel_values": a tensor of the preprocessed input image with pixel values 
-            scaled to [0, 1].
-            - "caption": the text caption.
-            - "input_ids": a tensor of the tokenized caption.
-
-        Note:
-        The actual preprocessing steps (scaling and normalization) for images are defined externally 
-        and passed to this class through the `image_prep` parameter during initialization. The 
-        tokenization process relies on the `tokenizer` also provided at initialization, which 
-        should be compatible with the models intended to be used with this dataset.
+              scaled to [0, 1].
         """
         img_name = self.img_names[idx]
-        input_img = Image.open(os.path.join(self.input_folder, img_name))
-        output_img = Image.open(os.path.join(self.output_folder, img_name))
-        caption = self.captions[img_name]
-
-        # input images scaled to 0,1
+        input_img = Image.open(os.path.join(self.input_folder, img_name)).convert("RGB")
+        output_img = Image.open(os.path.join(self.output_folder, img_name)).convert("RGB")
+        # #### 수정됨: 캡션 관련 부분 제거
+        # caption = self.captions[img_name]
+        # Tokenization 과정을 생략
         img_t = self.T(input_img)
         img_t = F.to_tensor(img_t)
-        # output images scaled to -1,1
         output_t = self.T(output_img)
         output_t = F.to_tensor(output_t)
         output_t = F.normalize(output_t, mean=[0.5], std=[0.5])
-
-        input_ids = self.tokenizer(
-            caption, max_length=self.tokenizer.model_max_length,
-            padding="max_length", truncation=True, return_tensors="pt"
-        ).input_ids
-
         return {
-            "output_pixel_values": output_t,
             "conditioning_pixel_values": img_t,
-            "caption": caption,
-            "input_ids": input_ids,
+            "output_pixel_values": output_t,
         }
 
 
 class UnpairedDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_folder, split, image_prep, tokenizer):
+    def __init__(self, dataset_folder, split, image_prep, tokenizer=None):
         """
         A dataset class for loading unpaired data samples from two distinct domains (source and target),
         typically used in unsupervised learning tasks like image-to-image translation.
 
-        The class supports loading images from specified dataset folders, applying predefined image
-        preprocessing transformations, and utilizing fixed textual prompts (captions) for each domain,
-        tokenized using a provided tokenizer.
+        This class supports loading images from specified dataset folders and applying predefined image
+        preprocessing transformations. Since img2img training does not use text prompts, the fixed caption
+        and tokenization are omitted.
 
         Parameters:
         - dataset_folder (str): Base directory of the dataset containing subdirectories (train_A, train_B, test_A, test_B)
         - split (str): Indicates the dataset split to use. Expected values are 'train' or 'test'.
-        - image_prep (str): he image preprocessing transformation to apply to each image.
-        - tokenizer: The tokenizer used for tokenizing the captions (or prompts).
+        - image_prep (str): The image preprocessing transformation to apply to each image.
+        - tokenizer: The tokenizer used for tokenizing the captions (or prompts).  #### 수정됨: img2img에서는 사용하지 않으므로 무시.
         """
         super().__init__()
         if split == "train":
@@ -331,21 +316,28 @@ class UnpairedDataset(torch.utils.data.Dataset):
         elif split == "test":
             self.source_folder = os.path.join(dataset_folder, "test_A")
             self.target_folder = os.path.join(dataset_folder, "test_B")
-        self.tokenizer = tokenizer
-        with open(os.path.join(dataset_folder, "fixed_prompt_a.txt"), "r") as f:
-            self.fixed_caption_src = f.read().strip()
-            self.input_ids_src = self.tokenizer(
-                self.fixed_caption_src, max_length=self.tokenizer.model_max_length,
-                padding="max_length", truncation=True, return_tensors="pt"
-            ).input_ids
+        self.tokenizer = tokenizer  # #### 수정됨: 더 이상 사용하지 않음
+        
+        # #### 수정됨: fixed_prompt 파일 읽기 및 토큰화 제거 (img2img에서는 사용하지 않음)
+        # with open(os.path.join(dataset_folder, "fixed_prompt_a.txt"), "r") as f:
+        #     self.fixed_caption_src = f.read().strip()
+        #     self.input_ids_src = self.tokenizer(
+        #         self.fixed_caption_src, max_length=self.tokenizer.model_max_length,
+        #         padding="max_length", truncation=True, return_tensors="pt"
+        #     ).input_ids
+        # with open(os.path.join(dataset_folder, "fixed_prompt_b.txt"), "r") as f:
+        #     self.fixed_caption_tgt = f.read().strip()
+        #     self.input_ids_tgt = self.tokenizer(
+        #         self.fixed_caption_tgt, max_length=self.tokenizer.model_max_length,
+        #         padding="max_length", truncation=True, return_tensors="pt"
+        #     ).input_ids
+        # 대신, 고정 캡션 관련 부분은 빈 문자열로 처리
+        self.fixed_caption_src = ""
+        self.fixed_caption_tgt = ""
+        self.input_ids_src = None
+        self.input_ids_tgt = None
 
-        with open(os.path.join(dataset_folder, "fixed_prompt_b.txt"), "r") as f:
-            self.fixed_caption_tgt = f.read().strip()
-            self.input_ids_tgt = self.tokenizer(
-                self.fixed_caption_tgt, max_length=self.tokenizer.model_max_length,
-                padding="max_length", truncation=True, return_tensors="pt"
-            ).input_ids
-        # find all images in the source and target folders with all IMG extensions
+        # find all images in the source and target folders with common IMG extensions
         self.l_imgs_src = []
         for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.gif"]:
             self.l_imgs_src.extend(glob(os.path.join(self.source_folder, ext)))
@@ -363,8 +355,7 @@ class UnpairedDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         """
-        Fetches a pair of unaligned images from the source and target domains along with their 
-        corresponding tokenized captions.
+        Fetches a pair of unaligned images from the source and target domains.
 
         For the source domain, if the requested index is within the range of available images,
         the specific image at that index is chosen. If the index exceeds the number of source
@@ -373,20 +364,11 @@ class UnpairedDataset(torch.utils.data.Dataset):
         unpaired nature of the dataset.
 
         Both images are preprocessed according to the specified image transformation `T`, and normalized.
-        The fixed captions for both domains
-        are included along with their tokenized forms.
-
-        Parameters:
-        - index (int): The index of the source image to retrieve.
 
         Returns:
         dict: A dictionary containing processed data for a single training example, with the following keys:
-            - "pixel_values_src": The processed source image
-            - "pixel_values_tgt": The processed target image
-            - "caption_src": The fixed caption of the source domain.
-            - "caption_tgt": The fixed caption of the target domain.
-            - "input_ids_src": The source domain's fixed caption tokenized.
-            - "input_ids_tgt": The target domain's fixed caption tokenized.
+            - "pixel_values_src": The processed source image.
+            - "pixel_values_tgt": The processed target image.
         """
         if index < len(self.l_imgs_src):
             img_path_src = self.l_imgs_src[index]
@@ -402,8 +384,9 @@ class UnpairedDataset(torch.utils.data.Dataset):
         return {
             "pixel_values_src": img_t_src,
             "pixel_values_tgt": img_t_tgt,
-            "caption_src": self.fixed_caption_src,
-            "caption_tgt": self.fixed_caption_tgt,
-            "input_ids_src": self.input_ids_src,
-            "input_ids_tgt": self.input_ids_tgt,
+            # #### 수정됨: 캡션 및 토큰화 관련 항목 제거
+            # "caption_src": self.fixed_caption_src,
+            # "caption_tgt": self.fixed_caption_tgt,
+            # "input_ids_src": self.input_ids_src,
+            # "input_ids_tgt": self.input_ids_tgt,
         }
